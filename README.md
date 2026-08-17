@@ -3,38 +3,26 @@
 A coding agent in one file. Four tools, a 140-token system prompt, a terminal UI,
 and any model on [Hugging Face Inference Providers](https://huggingface.co/docs/inference-providers).
 
-```
-  nanoharness  deepseek-ai/DeepSeek-V4-Pro  ·  ~/project  ·  2 skills
-
-  › mul is broken, fix it
-
-  mul adds instead of multiplying. Fixing it.
-
-  ▸ edit  calc.py  (1 edit(s))
-    applied 1 edit(s) to calc.py
-    --- a/calc.py
-    +++ b/calc.py
-    @@ -3,3 +3,3 @@
-
-     def mul(a, b):
-    -    return a + b
-    +    return a * b
-
-  Fixed. mul now multiplies.
-   ready  ·  deepseek-ai/DeepSeek-V4-Pro  ·  ask  ·  4,213 tok
- ask something, or /help
-```
+<p align="center">
+  <img src="docs/screenshot.png" alt="nanoharness fixing a bug" width="760">
+</p>
 
 ## Run it
 
 ```bash
-hf auth login          # once
-uv run nanoharness.py  # that's it
+uv run nanoharness.py
 ```
 
-No install step: [PEP 723](https://peps.python.org/pep-0723/) metadata at the top of
-the file declares the two dependencies, and `uv` fetches them on the fly. Or run one
-turn without the UI:
+That's the whole setup. No install step: [PEP 723](https://peps.python.org/pep-0723/)
+metadata at the top of the file declares the two dependencies, and `uv` fetches them on
+the fly.
+
+The first run signs you in — it opens the Hugging Face token page, takes a pasted read
+token, checks it, and saves it to the shared HF cache, so it happens once per machine
+and every other HF tool picks it up too. An existing `hf auth login` or `HF_TOKEN` is
+used as-is and you never see the prompt.
+
+Run one turn without the UI:
 
 ```bash
 uv run nanoharness.py "find the bug in calc.py and fix it"
@@ -46,7 +34,7 @@ Harnesses have become the interesting layer — the models converged, and the wr
 now decides most of the experience. But every harness worth reading is 50k+ lines
 across a monorepo, which is a bad way to learn what a harness actually *is*.
 
-nanoharness is the whole thing in one readable file: 807 lines, about 615 of them
+nanoharness is the whole thing in one readable file: 979 lines, about 755 of them
 code. It is assembled from the ideas the established open harnesses already
 proved, not invented from scratch. The [credits](#what-came-from-where) say what came
 from where.
@@ -207,7 +195,7 @@ file before pointing it at anything you care about.
 pytest test_nanoharness.py
 ```
 
-46 tests, no network — the model is faked, so the agent loop, tool semantics and the
+48 tests, no network — the model is faked, so the agent loop, tool semantics and the
 UI are all covered offline.
 
 ## License

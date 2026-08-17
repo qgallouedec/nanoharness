@@ -25,21 +25,27 @@ import os
 import shlex
 import subprocess
 import sys
+import time
 import urllib.request
+import webbrowser
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass, field
+from getpass import getpass
 from pathlib import Path
 from typing import Any
 
-from huggingface_hub import InferenceClient, get_token
+from huggingface_hub import InferenceClient, get_token, whoami
+from huggingface_hub.constants import HF_TOKEN_PATH
+from rich.console import Console
 from rich.markdown import Markdown
-from rich.syntax import Syntax
 from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import VerticalScroll
 from textual.screen import ModalScreen
+from textual.theme import Theme
 from textual.widgets import Input, Label, Static
 
 DEFAULT_MODEL = "deepseek-ai/DeepSeek-V4-Pro"
@@ -246,7 +252,7 @@ def tool_read(root: Path, path: str, offset: int = 1, limit: int | None = None) 
     if start > len(lines):
         raise ToolError(f"offset {start} is past the end of {path} ({len(lines)} lines)")
     end = len(lines) if limit is None else min(len(lines), start + limit - 1)
-    body = "\n".join(f"{i:>6}\t{lines[i - 1]}" for i in range(start, end + 1))
+    body = "\n".join(f"{i:>5}  {lines[i - 1]}" for i in range(start, end + 1))
     return truncate(body, READ_MAX_LINES, READ_MAX_BYTES)
 
 
@@ -255,7 +261,7 @@ def tool_write(root: Path, path: str, content: str) -> str:
     target.parent.mkdir(parents=True, exist_ok=True)
     verb = "overwrote" if target.is_file() else "created"
     target.write_text(content, encoding="utf-8")
-    return f"{verb} {path} ({len(content.splitlines())} lines)"
+    return f"{verb} {path} ({plural(len(content.splitlines()), 'line')})"
 
 
 def tool_edit(root: Path, path: str, edits: list[dict[str, str]]) -> str:
@@ -303,7 +309,7 @@ def tool_edit(root: Path, path: str, edits: list[dict[str, str]]) -> str:
     diff = difflib.unified_diff(
         original.splitlines(), updated.splitlines(), f"a/{name}", f"b/{name}", lineterm="", n=2
     )
-    return f"applied {len(spans)} edit(s) to {name}\n" + truncate("\n".join(diff), 120, 8000)
+    return f"applied {plural(len(spans), 'edit')} to {name}\n" + truncate("\n".join(diff), 120, 8000)
 
 
 def tool_bash(root: Path, command: str, timeout: int = BASH_TIMEOUT) -> str:
@@ -384,14 +390,18 @@ TOOL_FUNCS: dict[str, Callable[..., str]] = {
 MUTATING = {"write", "edit", "bash"}  # the calls worth confirming
 
 
+def plural(count: int, word: str) -> str:
+    return f"{count} {word}{'s' * (count != 1)}"
+
+
 def summarize(name: str, args: dict[str, Any]) -> str:
     """One line describing a pending call, for the log and the approval prompt."""
     if name == "bash":
         return args.get("command", "")
     if name == "edit":
-        return f"{args.get('path', '?')}  ({len(args.get('edits', []))} edit(s))"
+        return f"{args.get('path', '?')}  ({plural(len(args.get('edits', [])), 'edit')})"
     if name == "write":
-        return f"{args.get('path', '?')}  ({len(args.get('content', '').splitlines())} lines)"
+        return f"{args.get('path', '?')}  ({plural(len(args.get('content', '').splitlines()), 'line')})"
     span = f"  [{args.get('offset', 1)}:+{args.get('limit')}]" if args.get("limit") else ""
     return f"{args.get('path', '?')}{span}"
 
@@ -547,20 +557,95 @@ class Agent:
 # terminal ui
 # ---------------------------------------------------------------------------
 
+ADD, DEL, DIM = "#3fb950", "#f85149", "#6e7681"
+SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+THEME = Theme(
+    name="nano",
+    primary="#ffd21e",  # the Hugging Face yellow, since that is where the models come from
+    secondary="#ff9d00",
+    accent="#ffd21e",
+    foreground="#e6edf3",
+    background="#0e1116",
+    surface="#0e1116",
+    panel="#1b212a",
+    success=ADD,
+    error=DEL,
+    warning="#d29922",
+    dark=True,
+    variables={"text-muted": DIM, "block-cursor-background": "#ffd21e"},
+)
+
 CSS = """
-Screen { background: $surface; }
-#log { padding: 0 2; scrollbar-size: 0 1; }
-#status { height: 1; background: $panel; color: $text-muted; padding: 0 2; }
-#prompt { border: none; background: $panel; padding: 0 1; }
-#prompt:focus { border: none; }
-.user { margin-top: 1; }
-.assistant { margin-top: 1; }
-.tool { color: $text-muted; margin-top: 1; }
-.result { color: $text-muted; margin-left: 2; }
-.note { color: $text-muted; margin-top: 1; }
+Screen { background: $background; }
+
+#log {
+    padding: 1 3 0 3;
+    scrollbar-size: 0 1;
+    scrollbar-background: $background;
+    scrollbar-color: $panel;
+    scrollbar-color-hover: $primary;
+    scrollbar-color-active: $primary;
+}
+
+/* A turn reads top to bottom: your line is marked, the answer is plain prose,
+   and the machinery underneath it is dim and indented. */
+.user {
+    margin: 1 0 0 0;
+    padding: 0 0 0 1;
+    border-left: thick $primary;
+    text-style: bold;
+    color: $foreground;
+}
+.assistant { margin: 1 0 0 0; color: $foreground; }
+.tool { margin: 1 0 0 0; }
+.result { margin: 0 0 0 2; }
+.note { margin: 1 0 0 0; color: $text-muted; }
+
+#status { height: 1; margin-top: 1; padding: 0 3; color: $text-muted; background: $background; }
+#prompt {
+    margin: 0 2;
+    padding: 0 1;
+    border: round $panel;
+    background: $background;
+}
+#prompt:focus { border: round $primary; }
+#hint { height: 1; padding: 0 3; color: $text-muted; background: $background; }
+
 ApprovalScreen { align: center middle; }
-#dialog { width: 80; height: auto; padding: 1 2; background: $panel; border: round $warning; }
+#dialog { width: 76; height: auto; padding: 1 2; background: $panel; border: round $warning; }
+#dialog Static { margin: 1 0; }
 """
+
+
+def result_style(name: str, line: str, ok: bool) -> str:
+    """Colour one line of a tool result. Diffs get gutters; everything else stays quiet."""
+    if not ok:
+        return DEL
+    if name == "edit" and not line.startswith(("+++", "---")):
+        if line.startswith("+"):
+            return ADD
+        if line.startswith("-"):
+            return DEL
+    return DIM
+
+
+def render_result(name: str, body: str, ok: bool, max_lines: int = 12) -> Text:
+    """Fold a tool result into a glanceable block hung off the call above it."""
+    lines = body.splitlines() or ["(no output)"]
+    if ok and name == "edit":
+        # The a/ and b/ header names repeat the path already shown on the call line.
+        lines = [line for line in lines if not line.startswith(("--- a/", "+++ b/"))]
+    extra = len(lines) - max_lines
+    shown = lines[:max_lines]
+    if extra > 0:
+        shown.append(f"… +{plural(extra, 'more line')}")
+    out = Text()
+    for i, line in enumerate(shown):
+        out.append("\n" if i else "", style=DIM)
+        out.append("└ " if i == 0 else "  ", style=DIM)
+        out.append(line, style=result_style(name, line, ok))
+    return out
 
 
 class ApprovalScreen(ModalScreen[str]):
@@ -579,15 +664,25 @@ class ApprovalScreen(ModalScreen[str]):
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="dialog"):
-            yield Label(Text(f"run {self.tool_name}?", style="bold"))
-            yield Static(Text(self.detail, style="bold white"))
-            yield Label(Text("\ny yes    a always    n no", style="dim"))
+            yield Label(Text.assemble(("▲  run ", "bold #d29922"), (self.tool_name, "bold")))
+            yield Static(Text(self.detail))
+            yield Label(
+                Text.assemble(
+                    ("y", "bold #3fb950"),
+                    (" yes     ", DIM),
+                    ("a", "bold #3fb950"),
+                    (" always     ", DIM),
+                    ("n", "bold #f85149"),
+                    (" no", DIM),
+                )
+            )
 
     def action_choose(self, answer: str) -> None:
         self.dismiss(answer)
 
 
 class NanoHarness(App[None]):
+    TITLE = "nanoharness"
     CSS = CSS
     BINDINGS = [
         Binding("ctrl+c", "quit", "quit"),
@@ -600,31 +695,52 @@ class NanoHarness(App[None]):
         self.busy = False
         self.live: Static | None = None
         self.buffer = ""
+        self.started = 0.0
+        self.frame = 0
 
     def compose(self) -> ComposeResult:
         yield VerticalScroll(id="log")
-        yield Static(self.status_line(), id="status")
-        yield Input(placeholder="ask something, or /help", id="prompt")
+        yield Static(id="status")
+        yield Input(placeholder="ask for a change…", id="prompt")
+        yield Static(id="hint")
 
     def on_mount(self) -> None:
+        self.register_theme(THEME)
+        self.theme = "nano"
         self.query_one("#prompt", Input).focus()
+
         count = len(self.skills)
         skills = f"  ·  {count} skill{'s' * (count > 1)}" if count else ""
         self.say(
             Text.assemble(
+                ("◆ ", f"bold {THEME.primary}"),
                 ("nanoharness", "bold"),
-                (f"  {self.agent.model}  ·  {self.agent.root}{skills}", "dim"),
-            )
+                (f"\n  {self.agent.model}  ·  {self.agent.root}{skills}", DIM),
+            ),
+            "note",
         )
+        self.query_one("#hint", Static).update(
+            Text("/help for commands   ctrl+l clear   ctrl+c quit", style=DIM)
+        )
+        # One timer drives the spinner and the elapsed clock; it is cheap and
+        # only repaints a single line.
+        self.set_interval(1 / 12, self.sync_status)
+        self.sync_status()
 
     # --- rendering ---
 
-    def status_line(self) -> str:
-        state = "working" if self.busy else "ready"
+    def status_line(self) -> Text:
         mode = "yolo" if self.yolo else "ask"
-        # Not every provider reports usage; show the counter only once it is real.
+        # Not every provider reports usage, so show the counter only once it is real.
         used = f"  ·  {self.agent.tokens:,} tok" if self.agent.tokens else ""
-        return f" {state}  ·  {self.agent.model}  ·  {mode}{used}"
+        if self.busy:
+            self.frame = (self.frame + 1) % len(SPINNER)
+            elapsed = f"  ·  {time.monotonic() - self.started:.0f}s"
+            return Text.assemble(
+                (SPINNER[self.frame], f"bold {THEME.primary}"),
+                (f" working{elapsed}{used}", DIM),
+            )
+        return Text.assemble(("● ", f"bold {ADD}"), (f"ready  ·  {mode}{used}", DIM))
 
     def say(self, renderable: Any, css_class: str = "note") -> Static:
         widget = Static(renderable, classes=css_class)
@@ -644,8 +760,8 @@ class NanoHarness(App[None]):
             return
         if text.startswith("/"):
             return self.command(text)
-        self.say(Text(f"› {text}", style="bold"), "user")
-        self.busy = True
+        self.say(Text(text), "user")
+        self.busy, self.started = True, time.monotonic()
         self.sync_status()
         self.turn(text)
 
@@ -718,14 +834,17 @@ class NanoHarness(App[None]):
 
     def show_call(self, name: str, args: dict[str, Any]) -> None:
         self.seal()
-        self.say(Text.assemble(("▸ ", "bold"), (name, "bold"), ("  " + summarize(name, args), "")), "tool")
+        self.say(
+            Text.assemble(
+                ("● ", f"bold {THEME.primary}"),
+                (name, "bold"),
+                ("  " + summarize(name, args), DIM),
+            ),
+            "tool",
+        )
 
     def show_result(self, name: str, result: str, ok: bool) -> None:
-        body = result if len(result) < 1500 else result[:1500] + "\n… [truncated in view]"
-        if ok and name == "edit" and "@@" in body:
-            self.say(Syntax(body, "diff", theme="ansi_dark", word_wrap=True), "result")
-        else:
-            self.say(Text(body, style="" if ok else "red"), "result")
+        self.say(render_result(name, result, ok), "result")
 
     def ask(self, name: str, detail: str) -> Any:
         return self.push_screen_wait(ApprovalScreen(name, detail))
@@ -742,6 +861,60 @@ class NanoHarness(App[None]):
         self.say(Text(message, style="red"))
         self.busy = False
         self.sync_status()
+
+
+# ---------------------------------------------------------------------------
+# sign-in
+#
+# A first run should hand you a token rather than an error. Inference Providers
+# authenticate with an ordinary read token, and huggingface_hub caches it where
+# every other HF tool will find it, so this happens exactly once per machine.
+# ---------------------------------------------------------------------------
+
+TOKEN_URL = "https://huggingface.co/settings/tokens/new?tokenType=read"
+
+
+def sign_in() -> str | None:
+    """Return a Hub token, walking the user through creating one when there is none."""
+    if token := get_token():
+        return token
+
+    console = Console()
+    if not sys.stdin.isatty():
+        console.print("[#f85149]No Hugging Face token.[/] Set HF_TOKEN, or run `hf auth login`.")
+        return None
+
+    console.print("\n  [bold #ffd21e]◆[/] [bold]nanoharness[/] needs a Hugging Face token.\n")
+    console.print("  Create one with [bold]read[/] access:")
+    console.print(f"  [#ffd21e underline]{TOKEN_URL}[/]")
+    with suppress(Exception):
+        webbrowser.open(TOKEN_URL)
+    console.print("  [dim]If a browser did not open, copy that link.[/]\n")
+    console.print("  [dim]Paste the token below — input stays hidden, and it is saved for next time.[/]\n")
+
+    for _ in range(3):
+        try:
+            token = getpass("  token: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return None
+        if not token:
+            continue
+        try:
+            name = whoami(token=token)["name"]
+        except Exception as exc:
+            console.print(f"  [#f85149]That token did not work[/] [dim]({type(exc).__name__})[/]\n")
+            continue
+        # Written straight to the shared cache rather than through login(),
+        # which does extra account bookkeeping this flow does not need.
+        path = Path(HF_TOKEN_PATH)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(token)
+        path.chmod(0o600)
+        console.print(f"\n  [#3fb950]✓[/] signed in as [bold]{name}[/]  [dim]{path}[/]\n")
+        return token
+
+    console.print("  [dim]Giving up for now — run nanoharness again when you have a token.[/]")
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -782,9 +955,8 @@ def main() -> int:
     parser.add_argument("--hub-skills", action="store_true", help="also load skills from the Hub")
     args = parser.parse_args()
 
-    token = get_token()
-    if not token:
-        print("no Hugging Face token found — run `hf auth login`", file=sys.stderr)
+    token = sign_in()
+    if token is None:
         return 1
 
     root = Path(args.cwd).resolve()

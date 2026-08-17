@@ -6,6 +6,7 @@ pytest test_nanoharness.py
 from __future__ import annotations
 
 import asyncio
+import io
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -42,12 +43,12 @@ def root(tmp_path: Path) -> Path:
 
 
 def test_read_numbers_lines(root: Path) -> None:
-    assert tool_read(root, "calc.py").splitlines()[0] == "     1\tdef add(a, b):"
+    assert tool_read(root, "calc.py").splitlines()[0] == "    1  def add(a, b):"
 
 
 def test_read_offset_and_limit(root: Path) -> None:
     out = tool_read(root, "calc.py", offset=2, limit=1)
-    assert out.strip().startswith("2\t") and "return" in out
+    assert out.strip().startswith("2  ") and "return" in out
 
 
 def test_read_rejects_missing_file(root: Path) -> None:
@@ -182,8 +183,8 @@ def test_parse_frontmatter_ends_a_block_at_the_next_key() -> None:
 
 def test_summarize_describes_each_call() -> None:
     assert summarize("bash", {"command": "ls -la"}) == "ls -la"
-    assert "2 edit(s)" in summarize("edit", {"path": "a.py", "edits": [{}, {}]})
-    assert "1 lines" in summarize("write", {"path": "a.py", "content": "x\n"})
+    assert "2 edits" in summarize("edit", {"path": "a.py", "edits": [{}, {}]})
+    assert "1 line" in summarize("write", {"path": "a.py", "content": "x\n"})
 
 
 # --- skills and prompt ----------------------------------------------------
@@ -345,6 +346,21 @@ def test_read_only_calls_skip_approval(root: Path) -> None:
 
     agent.run("read", Callbacks(approve=approve))
     assert asked == []
+
+
+# --- sign-in --------------------------------------------------------------
+
+
+def test_sign_in_uses_an_existing_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(nanoharness, "get_token", lambda: "hf_already_here")
+    assert nanoharness.sign_in() == "hf_already_here"
+
+
+def test_sign_in_does_not_prompt_without_a_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A piped or scripted run should say what to do, not block on a hidden prompt."""
+    monkeypatch.setattr(nanoharness, "get_token", lambda: None)
+    monkeypatch.setattr("sys.stdin", io.StringIO())
+    assert nanoharness.sign_in() is None
 
 
 # --- ui -------------------------------------------------------------------
