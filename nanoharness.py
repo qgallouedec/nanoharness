@@ -766,8 +766,16 @@ def headless(agent: Agent, prompt: str) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser("nanoharness", description="a coding agent in one file")
     parser.add_argument("prompt", nargs="*", help="run one turn without the ui and exit")
-    parser.add_argument("--model", default=os.environ.get("NANOHARNESS_MODEL", DEFAULT_MODEL))
-    parser.add_argument("--provider", default=os.environ.get("NANOHARNESS_PROVIDER", "auto"))
+    parser.add_argument(
+        "--model",
+        default=os.environ.get("NANOHARNESS_MODEL", DEFAULT_MODEL),
+        help=f"model on Inference Providers (default {DEFAULT_MODEL})",
+    )
+    parser.add_argument(
+        "--provider",
+        default=os.environ.get("NANOHARNESS_PROVIDER", "auto"),
+        help="pin one provider instead of routing automatically",
+    )
     parser.add_argument("--cwd", default=".", help="working directory")
     parser.add_argument("--yolo", action="store_true", help="skip approval prompts")
     parser.add_argument("--no-commit", action="store_true", help="do not commit after each turn")
