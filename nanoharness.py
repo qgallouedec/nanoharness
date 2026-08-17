@@ -507,6 +507,10 @@ class Agent:
                 result, ok = self.invoke(call)
                 self.messages.append({"role": "tool", "tool_call_id": call["id"], "content": result})
                 cb.on_tool_end(call["name"], result, ok)
+        else:
+            # Falling out of the loop means the model never stopped asking for
+            # tools. Say so rather than ending the turn as if it had finished.
+            cb.on_text(f"\n[stopped after {MAX_STEPS} tool rounds]")
 
         cb.on_turn_end(git_autocommit(self.root, prompt) if self.autocommit else None)
 

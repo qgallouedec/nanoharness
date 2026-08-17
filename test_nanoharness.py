@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import nanoharness
 from nanoharness import (
     Agent,
     Callbacks,
@@ -321,6 +322,16 @@ def test_loop_survives_malformed_tool_arguments(root: Path) -> None:
     agent = make_agent(root, [[chunk(calls=[call])], [chunk("ok")]])
     agent.run("read", Callbacks())
     assert "not valid JSON" in agent.messages[-2]["content"]
+
+
+def test_loop_reports_an_exhausted_step_budget(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A model that never stops asking for tools must not look like a finished turn."""
+    monkeypatch.setattr(nanoharness, "MAX_STEPS", 2)
+    call = {"id": "1", "name": "read", "arguments": '{"path": "calc.py"}'}
+    agent = make_agent(root, [[chunk(calls=[call])]])
+    out: list[str] = []
+    agent.run("spin", Callbacks(on_text=out.append))
+    assert "stopped after 2 tool rounds" in "".join(out)
 
 
 def test_read_only_calls_skip_approval(root: Path) -> None:

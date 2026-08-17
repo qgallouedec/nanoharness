@@ -46,7 +46,7 @@ Harnesses have become the interesting layer — the models converged, and the wr
 now decides most of the experience. But every harness worth reading is 50k+ lines
 across a monorepo, which is a bad way to learn what a harness actually *is*.
 
-nanoharness is the whole thing in one readable file: 795 lines, about 610 of them
+nanoharness is the whole thing in one readable file: 799 lines, about 615 of them
 code. It is assembled from the ideas the established open harnesses already
 proved, not invented from scratch. The [credits](#what-came-from-where) say what came
 from where.
@@ -139,6 +139,10 @@ c993a4a calc.py has two bugs. fix both, then add a test file and run it
 So undo is `git revert`, review is `git show`, and the harness needs no checkpoint
 format of its own. `--no-commit` turns it off.
 
+Note that the commit stages everything not ignored, so uncommitted work of your own
+in the same tree gets swept into it. Start a turn from a clean tree, or use
+`--no-commit`.
+
 ## Approvals
 
 `write`, `edit` and `bash` ask before they run — `y` once, `a` for the rest of the
@@ -203,7 +207,7 @@ file before pointing it at anything you care about.
 pytest test_nanoharness.py
 ```
 
-45 tests, no network — the model is faked, so the agent loop, tool semantics and the
+46 tests, no network — the model is faked, so the agent loop, tool semantics and the
 UI are all covered offline.
 
 ## License
