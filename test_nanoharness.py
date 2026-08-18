@@ -226,13 +226,33 @@ def test_git_autocommit_commits_changes(root: Path) -> None:
     subprocess.run(["git", "commit", "-qm", "init"], cwd=root, capture_output=True)
 
     (root / "calc.py").write_text("changed\n")
-    assert git_autocommit(root, "fix the thing") is not None
+    assert git_autocommit(root, "fix the thing", set()) is not None
     log = subprocess.run(["git", "log", "-1", "--format=%s"], cwd=root, capture_output=True, text=True)
     assert log.stdout.strip() == "fix the thing"
 
 
+def test_git_autocommit_leaves_work_that_was_already_dirty(root: Path) -> None:
+    """A turn must not sweep up edits that predate it and name them after its prompt."""
+    for args in (["init", "-q"], ["config", "user.email", "t@t.co"], ["config", "user.name", "t"]):
+        subprocess.run(["git", *args], cwd=root, capture_output=True)
+    subprocess.run(["git", "add", "-A"], cwd=root, capture_output=True)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=root, capture_output=True)
+
+    (root / "calc.py").write_text("my own work in progress\n")
+    before = nanoharness.git_dirty(root)
+    (root / "agent.py").write_text("what the agent wrote\n")
+
+    assert git_autocommit(root, "write agent.py", before) is not None
+    files = subprocess.run(
+        ["git", "show", "--name-only", "--format=", "HEAD"], cwd=root, capture_output=True, text=True
+    )
+    assert files.stdout.split() == ["agent.py"]
+    assert (root / "calc.py").read_text() == "my own work in progress\n"
+    assert "calc.py" in nanoharness.git_dirty(root)  # still uncommitted, still yours
+
+
 def test_git_autocommit_is_a_no_op_outside_a_repo(root: Path) -> None:
-    assert git_autocommit(root, "nothing to see") is None
+    assert git_autocommit(root, "nothing to see", set()) is None
 
 
 # --- the loop, with a faked model ----------------------------------------

@@ -423,15 +423,39 @@ def git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(["git", *args], cwd=root, capture_output=True, text=True)
 
 
-def git_autocommit(root: Path, request: str) -> str | None:
-    """Commit whatever the turn changed. Returns the short sha, or None."""
-    if git(root, "rev-parse", "--is-inside-work-tree").returncode != 0:
-        return None
-    if not git(root, "status", "--porcelain").stdout.strip():
+def git_dirty(root: Path) -> set[str]:
+    """Paths git currently reports as changed. Empty when this is not a repo."""
+    done = git(root, "status", "--porcelain")
+    if done.returncode != 0:
+        return set()
+    # `XY path`, or `XY old -> new` for a rename; the destination is what matters.
+    return {
+        line[3:].split(" -> ")[-1].strip().strip('"') for line in done.stdout.splitlines() if line.strip()
+    }
+
+
+def git_autocommit(root: Path, request: str, before: set[str]) -> str | None:
+    """Commit only what this turn dirtied, and return the short sha.
+
+    Anything already modified when the turn started belongs to you, not to the
+    agent, so it is left alone -- otherwise a single turn sweeps unrelated work
+    into a commit named after an unrelated request.
+    """
+    changed = sorted(git_dirty(root) - before)
+    if not changed:
         return None
     subject = " ".join(request.split())[:68] or "agent changes"
-    git(root, "add", "-A")
-    git(root, "commit", "-m", subject, "-m", "Co-Authored-By: nanoharness <noreply@huggingface.co>")
+    git(root, "add", "--", *changed)
+    git(
+        root,
+        "commit",
+        "-m",
+        subject,
+        "-m",
+        "Co-Authored-By: nanoharness <noreply@huggingface.co>",
+        "--",
+        *changed,
+    )
     return git(root, "rev-parse", "--short", "HEAD").stdout.strip() or None
 
 
@@ -496,6 +520,8 @@ class Agent:
     def run(self, prompt: str, cb: Callbacks) -> None:
         """Drive one user turn to completion."""
         self.cb = cb
+        # Whatever is already dirty is yours; only new damage gets committed.
+        before = git_dirty(self.root) if self.autocommit else set()
         self.messages.append({"role": "user", "content": prompt})
 
         for _ in range(MAX_STEPS):
@@ -526,7 +552,7 @@ class Agent:
             # tools. Say so rather than ending the turn as if it had finished.
             cb.on_text(f"\n[stopped after {MAX_STEPS} tool rounds]")
 
-        cb.on_turn_end(git_autocommit(self.root, prompt) if self.autocommit else None)
+        cb.on_turn_end(git_autocommit(self.root, prompt, before) if self.autocommit else None)
 
     def invoke(self, call: dict[str, Any]) -> tuple[str, bool]:
         name, args, error = call["name"], {}, None
@@ -812,22 +838,22 @@ class NanoHarness(App[None]):
 
     # --- approval, inline rather than a screen ---
 
-    def approve(self, name: str, args: dict[str, Any]) -> bool:
+    def approve(self, _name: str, _args: dict[str, Any]) -> bool:
         """Called on the worker thread. Blocks it until a keypress resolves the gate."""
         if self.yolo:
             return True
         self.answer, self.gate = "", threading.Event()
-        self.call_from_thread(self.open_gate, name)
+        self.call_from_thread(self.open_gate)
         self.gate.wait()
         self.yolo = self.yolo or self.answer == "always"
         return self.answer in ("yes", "always")
 
-    def open_gate(self, name: str) -> None:
-        """Ask in the transcript, under the call being asked about."""
+    def open_gate(self) -> None:
+        """Ask in the transcript, directly under the call being asked about."""
         self.row = self.say(
             Text.assemble(
                 ("? ", f"bold {THEME.warning}"),
-                (f"run {name}?", "bold"),
+                ("run this?", "bold"),
                 ("   y", f"bold {ADD}"),
                 (" yes", DIM),
                 ("   a", f"bold {ADD}"),

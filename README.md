@@ -34,7 +34,7 @@ Harnesses have become the interesting layer — the models converged, and the wr
 now decides most of the experience. But every harness worth reading is 50k+ lines
 across a monorepo, which is a bad way to learn what a harness actually *is*.
 
-nanoharness is the whole thing in one readable file: 1011 lines, about 785 of them
+nanoharness is the whole thing in one readable file: 1042 lines, about 815 of them
 code. It is assembled from the ideas the established open harnesses already
 proved, not invented from scratch. The [credits](#what-came-from-where) say what came
 from where.
@@ -127,15 +127,23 @@ c993a4a calc.py has two bugs. fix both, then add a test file and run it
 So undo is `git revert`, review is `git show`, and the harness needs no checkpoint
 format of its own. `--no-commit` turns it off.
 
-Note that the commit stages everything not ignored, so uncommitted work of your own
-in the same tree gets swept into it. Start a turn from a clean tree, or use
-`--no-commit`.
+Only what the turn dirtied is committed. Anything already modified when the turn
+started is yours, not the agent's, and is left uncommitted — so working in a tree with
+changes in flight does not fold them into a commit named after an unrelated request.
 
 ## Approvals
 
 `write`, `edit` and `bash` ask before they run — `y` once, `a` for the rest of the
-session, `n` to refuse. A refusal is reported back to the model as a tool result, so
-it adapts instead of crashing. `read` never asks. `--yolo` or `/yolo` skips the gate.
+session, `n` to refuse.
+
+<p align="center">
+  <img src="docs/approval.png" alt="the inline approval gate" width="700">
+</p>
+
+The question appears inline, directly under the call it is about, rather than in a
+dialog over the top of everything — you approve a command while still looking at it.
+A refusal goes back to the model as a tool result, so it adapts instead of crashing.
+`read` never asks. `--yolo` or `/yolo` skips the gate.
 
 ## Flags and commands
 
@@ -219,7 +227,7 @@ file before pointing it at anything you care about.
 pytest test_nanoharness.py
 ```
 
-54 tests, no network — the model is faked, so the agent loop, tool semantics and the
+55 tests, no network — the model is faked, so the agent loop, tool semantics and the
 UI are all covered offline.
 
 ## License
