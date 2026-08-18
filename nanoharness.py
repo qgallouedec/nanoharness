@@ -219,7 +219,12 @@ class ToolError(Exception):
 
 
 def resolve(root: Path, path: str) -> Path:
-    return Path(path).resolve() if os.path.isabs(path) else (root / path).resolve()
+    """Resolve a tool path. An absolute `path` replaces `root`, which is pathlib's rule."""
+    return (root / path).resolve()
+
+
+def plural(count: int, word: str) -> str:
+    return f"{count} {word}{'s' * (count != 1)}"
 
 
 def truncate(text: str, max_lines: int, max_bytes: int, keep: str = "head") -> str:
@@ -325,8 +330,17 @@ def tool_bash(root: Path, command: str, timeout: int = BASH_TIMEOUT) -> str:
     return prefix + (out or "(no output)")
 
 
-def schema(name: str, description: str, required: str, **properties: dict[str, Any]) -> dict[str, Any]:
-    """Build one OpenAI-style tool schema. `required` is a space separated list."""
+TOOL_FUNCS: dict[str, Callable[..., str]] = {}
+
+
+def tool(func: Callable[..., str], description: str, required: str, **properties: dict[str, Any]) -> dict:
+    """Describe one tool for the model and register its implementation.
+
+    The name comes from the function, so the schema and the dispatch table can
+    never drift apart. `required` is a space separated list of property names.
+    """
+    name = func.__name__.removeprefix("tool_")
+    TOOL_FUNCS[name] = func
     return {
         "type": "function",
         "function": {
@@ -343,23 +357,23 @@ def schema(name: str, description: str, required: str, **properties: dict[str, A
 
 STR, INT = {"type": "string"}, {"type": "integer"}
 TOOLS = [
-    schema(
-        "read",
+    tool(
+        tool_read,
         "Read a file. Returns 1-indexed numbered lines. Use offset/limit for large files.",
         "path",
         path=STR | {"description": "File path, relative or absolute."},
         offset=INT | {"description": "First line to read, 1-indexed."},
         limit=INT | {"description": "Maximum number of lines."},
     ),
-    schema(
-        "write",
+    tool(
+        tool_write,
         "Create a file, or overwrite one entirely. Prefer edit for files that exist.",
         "path content",
         path=STR,
         content=STR,
     ),
-    schema(
-        "edit",
+    tool(
+        tool_edit,
         "Replace exact snippets in a file. Each 'old' must occur exactly once and match byte for "
         "byte including indentation. Edits are matched against the original file, so they must not overlap.",
         "path edits",
@@ -373,25 +387,15 @@ TOOLS = [
             },
         },
     ),
-    schema(
-        "bash",
+    tool(
+        tool_bash,
         "Run a shell command in the working directory. Use it for ls, rg, find, git and tests.",
         "command",
         command=STR,
         timeout=INT | {"description": f"Seconds, default {BASH_TIMEOUT}."},
     ),
 ]
-TOOL_FUNCS: dict[str, Callable[..., str]] = {
-    "read": tool_read,
-    "write": tool_write,
-    "edit": tool_edit,
-    "bash": tool_bash,
-}
 MUTATING = {"write", "edit", "bash"}  # the calls worth confirming
-
-
-def plural(count: int, word: str) -> str:
-    return f"{count} {word}{'s' * (count != 1)}"
 
 
 def summarize(name: str, args: dict[str, Any]) -> str:
@@ -525,13 +529,11 @@ class Agent:
         cb.on_turn_end(git_autocommit(self.root, prompt) if self.autocommit else None)
 
     def invoke(self, call: dict[str, Any]) -> tuple[str, bool]:
-        name = call["name"]
+        name, args, error = call["name"], {}, None
         try:
             args = json.loads(call["arguments"] or "{}")
         except json.JSONDecodeError as exc:
-            args, error = {}, f"error: arguments were not valid JSON: {exc}"
-        else:
-            error = None
+            error = f"error: arguments were not valid JSON: {exc}"
 
         # Announce the call before doing anything with it, so a failure is always
         # attributed to a visible tool rather than appearing out of nowhere.
@@ -591,18 +593,24 @@ Screen { background: $background; }
 /* A turn reads top to bottom: your line is marked, the answer is plain prose,
    and the machinery underneath it is dim and indented. */
 .user {
-    margin: 1 0 0 0;
-    padding: 0 0 0 1;
+    margin: 2 0 1 0;
+    padding: 0 1;
+    background: $panel;
     border-left: thick $primary;
     text-style: bold;
     color: $foreground;
 }
-.assistant { margin: 1 0 0 0; color: $foreground; }
+.assistant {
+    margin: 1 0 0 0;
+    padding: 0 1;
+    border-left: thick #3d444d;
+    color: $foreground;
+}
 .tool { margin: 1 0 0 0; }
 .result { margin: 0 0 0 2; }
 .note { margin: 1 0 0 0; color: $text-muted; }
 
-#status { height: 1; margin-top: 1; padding: 0 3; color: $text-muted; background: $background; }
+#status { height: 1; padding: 0 3; color: $text-muted; background: $background; }
 #prompt {
     margin: 0 2;
     padding: 0 1;
@@ -642,8 +650,7 @@ def render_result(name: str, body: str, ok: bool, max_lines: int = 12) -> Text:
         shown.append(f"… +{plural(extra, 'more line')}")
     out = Text()
     for i, line in enumerate(shown):
-        out.append("\n" if i else "", style=DIM)
-        out.append("└ " if i == 0 else "  ", style=DIM)
+        out.append("└ " if i == 0 else "\n  ", style=DIM)
         out.append(line, style=result_style(name, line, ok))
     return out
 
@@ -664,15 +671,15 @@ class ApprovalScreen(ModalScreen[str]):
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="dialog"):
-            yield Label(Text.assemble(("▲  run ", "bold #d29922"), (self.tool_name, "bold")))
+            yield Label(Text.assemble(("▲  run ", f"bold {THEME.warning}"), (self.tool_name, "bold")))
             yield Static(Text(self.detail))
             yield Label(
                 Text.assemble(
-                    ("y", "bold #3fb950"),
+                    ("y", f"bold {ADD}"),
                     (" yes     ", DIM),
-                    ("a", "bold #3fb950"),
+                    ("a", f"bold {ADD}"),
                     (" always     ", DIM),
-                    ("n", "bold #f85149"),
+                    ("n", f"bold {DEL}"),
                     (" no", DIM),
                 )
             )
@@ -709,8 +716,7 @@ class NanoHarness(App[None]):
         self.theme = "nano"
         self.query_one("#prompt", Input).focus()
 
-        count = len(self.skills)
-        skills = f"  ·  {count} skill{'s' * (count > 1)}" if count else ""
+        skills = f"  ·  {plural(len(self.skills), 'skill')}" if self.skills else ""
         self.say(
             Text.assemble(
                 ("◆ ", f"bold {THEME.primary}"),
@@ -730,17 +736,14 @@ class NanoHarness(App[None]):
     # --- rendering ---
 
     def status_line(self) -> Text:
-        mode = "yolo" if self.yolo else "ask"
-        # Not every provider reports usage, so show the counter only once it is real.
-        used = f"  ·  {self.agent.tokens:,} tok" if self.agent.tokens else ""
-        if self.busy:
-            self.frame = (self.frame + 1) % len(SPINNER)
-            elapsed = f"  ·  {time.monotonic() - self.started:.0f}s"
-            return Text.assemble(
-                (SPINNER[self.frame], f"bold {THEME.primary}"),
-                (f" working{elapsed}{used}", DIM),
-            )
-        return Text.assemble(("● ", f"bold {ADD}"), (f"ready  ·  {mode}{used}", DIM))
+        """Only says something while there is something to say."""
+        if not self.busy:
+            return Text("")
+        self.frame = (self.frame + 1) % len(SPINNER)
+        return Text.assemble(
+            (SPINNER[self.frame], f"bold {THEME.primary}"),
+            (f"  {time.monotonic() - self.started:.0f}s", DIM),
+        )
 
     def say(self, renderable: Any, css_class: str = "note") -> Static:
         widget = Static(renderable, classes=css_class)
@@ -884,13 +887,15 @@ def sign_in() -> str | None:
         console.print("[#f85149]No Hugging Face token.[/] Set HF_TOKEN, or run `hf auth login`.")
         return None
 
-    console.print("\n  [bold #ffd21e]◆[/] [bold]nanoharness[/] needs a Hugging Face token.\n")
-    console.print("  Create one with [bold]read[/] access:")
-    console.print(f"  [#ffd21e underline]{TOKEN_URL}[/]")
     with suppress(Exception):
         webbrowser.open(TOKEN_URL)
-    console.print("  [dim]If a browser did not open, copy that link.[/]\n")
-    console.print("  [dim]Paste the token below — input stays hidden, and it is saved for next time.[/]\n")
+    console.print(
+        f"\n  [bold {THEME.primary}]◆[/] [bold]nanoharness[/] needs a Hugging Face token.\n\n"
+        f"  Create one with [bold]read[/] access:\n"
+        f"  [{THEME.primary} underline]{TOKEN_URL}[/]\n"
+        f"  [dim]If a browser did not open, copy that link.[/]\n\n"
+        f"  [dim]Paste it below — input stays hidden, and it is saved for next time.[/]\n"
+    )
 
     for _ in range(3):
         try:
