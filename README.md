@@ -34,7 +34,7 @@ Harnesses have become the interesting layer — the models converged, and the wr
 now decides most of the experience. But every harness worth reading is 50k+ lines
 across a monorepo, which is a bad way to learn what a harness actually *is*.
 
-nanoharness is the whole thing in one readable file: 984 lines, about 760 of them
+nanoharness is the whole thing in one readable file: 1011 lines, about 785 of them
 code. It is assembled from the ideas the established open harnesses already
 proved, not invented from scratch. The [credits](#what-came-from-where) say what came
 from where.
@@ -144,12 +144,36 @@ it adapts instead of crashing. `read` never asks. `--yolo` or `/yolo` skips the 
 | `--model ID` | any model on Inference Providers (default `deepseek-ai/DeepSeek-V4-Pro`) |
 | `--provider NAME` | pin a specific provider instead of `auto` |
 | `--cwd PATH` | working directory |
+| `--token-file PATH` | use the token in this file instead of your HF login |
+| `--bill-to ORG` | charge inference to an org, for tokens scoped to one |
 | `--yolo` | skip approval prompts |
 | `--no-commit` | do not commit after each turn |
 | `--hub-skills` | also load skills from the Hub |
 
-`NANOHARNESS_MODEL` and `NANOHARNESS_PROVIDER` work as environment defaults.
-In the UI: `/model <id>`, `/skills`, `/yolo`, `/clear`, `/quit`, and `ctrl+l` to clear.
+Every flag has an environment default: `NANOHARNESS_MODEL`, `NANOHARNESS_PROVIDER`,
+`NANOHARNESS_TOKEN_FILE`, `NANOHARNESS_BILL_TO`, plus `NANOHARNESS_TOKEN` to pass a
+token inline. In the UI: `/model <id>`, `/skills`, `/yolo`, `/clear`, `/quit`, and
+`ctrl+l` to clear.
+
+### Using a specific token
+
+Token precedence is `--token-file`, then `$NANOHARNESS_TOKEN`, then whatever
+`huggingface_hub` already has — so you can point this harness at one token without
+touching your global HF login:
+
+```bash
+uv run nanoharness.py --token-file ~/.hf_inference_token
+```
+
+A fine-grained token whose inference permission is scoped to an org, rather than
+granted globally, also needs that org named so the call can be billed to it:
+
+```bash
+uv run nanoharness.py --token-file ~/.hf_inference_token --bill-to my-org
+```
+
+Without it the router answers `Make sure your token has the correct permissions`,
+which reads like a bad token but means a missing billing target.
 
 ## What came from where
 
@@ -195,7 +219,7 @@ file before pointing it at anything you care about.
 pytest test_nanoharness.py
 ```
 
-48 tests, no network — the model is faked, so the agent loop, tool semantics and the
+54 tests, no network — the model is faked, so the agent loop, tool semantics and the
 UI are all covered offline.
 
 ## License

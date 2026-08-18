@@ -356,6 +356,36 @@ def test_sign_in_uses_an_existing_token(monkeypatch: pytest.MonkeyPatch) -> None
     assert nanoharness.sign_in() == "hf_already_here"
 
 
+def test_sign_in_reads_a_token_file(root: Path) -> None:
+    (root / ".inf_token").write_text("hf_from_a_file\n")
+    assert nanoharness.sign_in(str(root / ".inf_token")) == "hf_from_a_file"
+
+
+def test_sign_in_prefers_the_token_file_over_the_hf_login(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pointing the harness at one token must not depend on the global HF login."""
+    monkeypatch.setattr(nanoharness, "get_token", lambda: "hf_global")
+    (root / ".inf_token").write_text("hf_specific")
+    assert nanoharness.sign_in(str(root / ".inf_token")) == "hf_specific"
+
+
+@pytest.mark.parametrize("contents", ["", "   \n"])
+def test_sign_in_rejects_an_empty_token_file(root: Path, contents: str) -> None:
+    (root / ".inf_token").write_text(contents)
+    assert nanoharness.sign_in(str(root / ".inf_token")) is None
+
+
+def test_sign_in_reports_an_unreadable_token_file(root: Path) -> None:
+    assert nanoharness.sign_in(str(root / "nope")) is None
+
+
+def test_sign_in_honours_the_environment_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(nanoharness, "get_token", lambda: "hf_global")
+    monkeypatch.setenv("NANOHARNESS_TOKEN", "hf_from_env")
+    assert nanoharness.sign_in() == "hf_from_env"
+
+
 def test_sign_in_does_not_prompt_without_a_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
     """A piped or scripted run should say what to do, not block on a hidden prompt."""
     monkeypatch.setattr(nanoharness, "get_token", lambda: None)

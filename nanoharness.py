@@ -877,12 +877,29 @@ class NanoHarness(App[None]):
 TOKEN_URL = "https://huggingface.co/settings/tokens/new?tokenType=read"
 
 
-def sign_in() -> str | None:
-    """Return a Hub token, walking the user through creating one when there is none."""
-    if token := get_token():
+def sign_in(token_file: str | None = None) -> str | None:
+    """Return a Hub token, walking the user through creating one when there is none.
+
+    Precedence: an explicit --token-file, then $NANOHARNESS_TOKEN, then whatever
+    huggingface_hub already has ($HF_TOKEN or the login cache). The first two let
+    you point this harness at one token without disturbing your global HF login.
+    """
+    console = Console()
+    if token_file:
+        path = Path(token_file).expanduser()
+        try:
+            token = path.read_text().strip()
+        except OSError as exc:
+            console.print(f"[#f85149]Cannot read {path}:[/] {exc}")
+            return None
+        if not token:
+            console.print(f"[#f85149]{path} is empty.[/]")
+            return None
         return token
 
-    console = Console()
+    if token := (os.environ.get("NANOHARNESS_TOKEN") or get_token()):
+        return token
+
     if not sys.stdin.isatty():
         console.print("[#f85149]No Hugging Face token.[/] Set HF_TOKEN, or run `hf auth login`.")
         return None
@@ -955,12 +972,22 @@ def main() -> int:
         help="pin one provider instead of routing automatically",
     )
     parser.add_argument("--cwd", default=".", help="working directory")
+    parser.add_argument(
+        "--token-file",
+        default=os.environ.get("NANOHARNESS_TOKEN_FILE"),
+        help="read the Hub token from this file instead of the usual HF login",
+    )
+    parser.add_argument(
+        "--bill-to",
+        default=os.environ.get("NANOHARNESS_BILL_TO"),
+        help="charge inference to this org, for tokens scoped to one",
+    )
     parser.add_argument("--yolo", action="store_true", help="skip approval prompts")
     parser.add_argument("--no-commit", action="store_true", help="do not commit after each turn")
     parser.add_argument("--hub-skills", action="store_true", help="also load skills from the Hub")
     args = parser.parse_args()
 
-    token = sign_in()
+    token = sign_in(args.token_file)
     if token is None:
         return 1
 
@@ -969,7 +996,7 @@ def main() -> int:
     agent = Agent(
         root=root,
         model=args.model,
-        client=InferenceClient(provider=args.provider, api_key=token),
+        client=InferenceClient(provider=args.provider, api_key=token, bill_to=args.bill_to),
         system=build_system_prompt(root, skills),
         autocommit=not args.no_commit,
     )
