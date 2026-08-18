@@ -397,7 +397,7 @@ def test_sign_in_does_not_prompt_without_a_terminal(monkeypatch: pytest.MonkeyPa
 
 
 @pytest.mark.parametrize(("key", "written"), [("y", True), ("n", False)])
-def test_the_approval_modal_gates_a_write(root: Path, key: str, written: bool) -> None:
+def test_the_approval_gate_blocks_a_write_until_a_key(root: Path, key: str, written: bool) -> None:
     """Covers the worker-thread to UI hop: the loop blocks until a key is pressed."""
     call = {"id": "1", "name": "write", "arguments": '{"path": "gated.py", "content": "x = 1\\n"}'}
     agent = make_agent(root, [[chunk(calls=[call])], [chunk("ok")]])
@@ -409,8 +409,9 @@ def test_the_approval_modal_gates_a_write(root: Path, key: str, written: bool) -
             await pilot.press("enter")
             for _ in range(50):
                 await pilot.pause()
-                if len(app.screen_stack) > 1:
+                if app.row is not None:  # the inline gate is up
                     break
+            assert app.query_one("#prompt").disabled, "input must not eat the answer"
             await pilot.press(key)
             for _ in range(50):
                 await pilot.pause()

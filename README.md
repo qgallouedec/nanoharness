@@ -141,7 +141,7 @@ it adapts instead of crashing. `read` never asks. `--yolo` or `/yolo` skips the 
 
 | flag | |
 |---|---|
-| `--model ID` | any model on Inference Providers (default `deepseek-ai/DeepSeek-V4-Pro`) |
+| `--model ID` | any model on Inference Providers (default `moonshotai/Kimi-K3`) |
 | `--provider NAME` | pin a specific provider instead of `auto` |
 | `--cwd PATH` | working directory |
 | `--token-file PATH` | use the token in this file instead of your HF login |

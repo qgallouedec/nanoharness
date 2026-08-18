@@ -25,6 +25,7 @@ import os
 import shlex
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 import webbrowser
@@ -40,15 +41,14 @@ from huggingface_hub.constants import HF_TOKEN_PATH
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.text import Text
-from textual import work
+from textual import events, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import VerticalScroll
-from textual.screen import ModalScreen
 from textual.theme import Theme
-from textual.widgets import Input, Label, Static
+from textual.widgets import Input, Static
 
-DEFAULT_MODEL = "deepseek-ai/DeepSeek-V4-Pro"
+DEFAULT_MODEL = "moonshotai/Kimi-K3"
 HUB_SKILL_TAG = "agent-skill"
 MAX_STEPS = 100  # tool rounds per turn; a runaway backstop, not a budget
 READ_MAX_LINES, READ_MAX_BYTES = 2000, 100_000
@@ -608,6 +608,7 @@ Screen { background: $background; }
 }
 .tool { margin: 1 0 0 0; }
 .result { margin: 0 0 0 2; }
+.gate { margin: 0 0 0 2; }
 .note { margin: 1 0 0 0; color: $text-muted; }
 
 #status { height: 1; padding: 0 3; color: $text-muted; background: $background; }
@@ -620,9 +621,6 @@ Screen { background: $background; }
 #prompt:focus { border: round $primary; }
 #hint { height: 1; padding: 0 3; color: $text-muted; background: $background; }
 
-ApprovalScreen { align: center middle; }
-#dialog { width: 76; height: auto; padding: 1 2; background: $panel; border: round $warning; }
-#dialog Static { margin: 1 0; }
 """
 
 
@@ -655,39 +653,6 @@ def render_result(name: str, body: str, ok: bool, max_lines: int = 12) -> Text:
     return out
 
 
-class ApprovalScreen(ModalScreen[str]):
-    """Confirm a mutating call. One keypress, no mouse."""
-
-    BINDINGS = [
-        Binding("y", "choose('yes')", "yes"),
-        Binding("a", "choose('always')", "always"),
-        Binding("n", "choose('no')", "no"),
-        Binding("escape", "choose('no')", "no"),
-    ]
-
-    def __init__(self, name: str, detail: str) -> None:
-        super().__init__()
-        self.tool_name, self.detail = name, detail
-
-    def compose(self) -> ComposeResult:
-        with VerticalScroll(id="dialog"):
-            yield Label(Text.assemble(("▲  run ", f"bold {THEME.warning}"), (self.tool_name, "bold")))
-            yield Static(Text(self.detail))
-            yield Label(
-                Text.assemble(
-                    ("y", f"bold {ADD}"),
-                    (" yes     ", DIM),
-                    ("a", f"bold {ADD}"),
-                    (" always     ", DIM),
-                    ("n", f"bold {DEL}"),
-                    (" no", DIM),
-                )
-            )
-
-    def action_choose(self, answer: str) -> None:
-        self.dismiss(answer)
-
-
 class NanoHarness(App[None]):
     TITLE = "nanoharness"
     CSS = CSS
@@ -704,6 +669,9 @@ class NanoHarness(App[None]):
         self.buffer = ""
         self.started = 0.0
         self.frame = 0
+        self.gate: threading.Event | None = None
+        self.row: Static | None = None
+        self.answer = ""
 
     def compose(self) -> ComposeResult:
         yield VerticalScroll(id="log")
@@ -801,13 +769,6 @@ class NanoHarness(App[None]):
     def turn(self, prompt: str) -> None:
         hop = self.call_from_thread
 
-        def approve(name: str, args: dict[str, Any]) -> bool:
-            if self.yolo:
-                return True
-            answer = hop(self.ask, name, summarize(name, args))
-            self.yolo = self.yolo or answer == "always"
-            return answer in ("yes", "always")
-
         try:
             self.agent.run(
                 prompt,
@@ -816,7 +777,7 @@ class NanoHarness(App[None]):
                     on_tool_start=lambda name, args: hop(self.show_call, name, args),
                     on_tool_end=lambda name, result, ok: hop(self.show_result, name, result, ok),
                     on_turn_end=lambda sha: hop(self.finish, sha),
-                    approve=approve,
+                    approve=self.approve,
                 ),
             )
         except Exception as exc:
@@ -849,8 +810,52 @@ class NanoHarness(App[None]):
     def show_result(self, name: str, result: str, ok: bool) -> None:
         self.say(render_result(name, result, ok), "result")
 
-    def ask(self, name: str, detail: str) -> Any:
-        return self.push_screen_wait(ApprovalScreen(name, detail))
+    # --- approval, inline rather than a screen ---
+
+    def approve(self, name: str, args: dict[str, Any]) -> bool:
+        """Called on the worker thread. Blocks it until a keypress resolves the gate."""
+        if self.yolo:
+            return True
+        self.answer, self.gate = "", threading.Event()
+        self.call_from_thread(self.open_gate, name)
+        self.gate.wait()
+        self.yolo = self.yolo or self.answer == "always"
+        return self.answer in ("yes", "always")
+
+    def open_gate(self, name: str) -> None:
+        """Ask in the transcript, under the call being asked about."""
+        self.row = self.say(
+            Text.assemble(
+                ("? ", f"bold {THEME.warning}"),
+                (f"run {name}?", "bold"),
+                ("   y", f"bold {ADD}"),
+                (" yes", DIM),
+                ("   a", f"bold {ADD}"),
+                (" always", DIM),
+                ("   n", f"bold {DEL}"),
+                (" no", DIM),
+            ),
+            "gate",
+        )
+        # The input would otherwise swallow y/a/n before the app sees them.
+        self.query_one("#prompt", Input).disabled = True
+        self.set_focus(None)
+
+    def on_key(self, event: events.Key) -> None:
+        if self.gate is None or self.gate.is_set():
+            return
+        answer = {"y": "yes", "a": "always", "n": "no", "escape": "no"}.get(event.key)
+        if answer is None:
+            return
+        event.stop()
+        self.answer = answer
+        if self.row is not None:
+            self.row.remove()
+            self.row = None
+        prompt = self.query_one("#prompt", Input)
+        prompt.disabled = False
+        prompt.focus()
+        self.gate.set()
 
     def finish(self, sha: str | None) -> None:
         self.seal()
