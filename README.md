@@ -34,7 +34,7 @@ Harnesses have become the interesting layer — the models converged, and the wr
 now decides most of the experience. But every harness worth reading is 50k+ lines
 across a monorepo, which is a bad way to learn what a harness actually *is*.
 
-nanoharness is the whole thing in one readable file: 1042 lines, about 815 of them
+nanoharness is the whole thing in one readable file: 1004 lines, about 790 of them
 code. It is assembled from the ideas the established open harnesses already
 proved, not invented from scratch. The [credits](#what-came-from-where) say what came
 from where.
@@ -53,7 +53,6 @@ while True:
     messages.append(assistant(text, calls))
     for call in calls:
         messages.append(tool_result(call, run(call)))   # observe, then loop
-git_commit(prompt)
 ```
 
 Reason, act, observe, repeat. Everything else is a detail about *which* tools exist
@@ -115,22 +114,6 @@ repos tagged [`agent-skill`](https://huggingface.co/datasets?other=agent-skill) 
 root `SKILL.md`, pinned to a commit. The model fetches a body with `curl` only when it
 wants one.
 
-## Git
-
-Every turn that changes a file gets a commit, with your request as the subject:
-
-```
-$ git log --oneline -1
-c993a4a calc.py has two bugs. fix both, then add a test file and run it
-```
-
-So undo is `git revert`, review is `git show`, and the harness needs no checkpoint
-format of its own. `--no-commit` turns it off.
-
-Only what the turn dirtied is committed. Anything already modified when the turn
-started is yours, not the agent's, and is left uncommitted — so working in a tree with
-changes in flight does not fold them into a commit named after an unrelated request.
-
 ## Approvals
 
 `write`, `edit` and `bash` ask before they run — `y` once, `a` for the rest of the
@@ -155,7 +138,6 @@ A refusal goes back to the model as a tool result, so it adapts instead of crash
 | `--token-file PATH` | use the token in this file instead of your HF login |
 | `--bill-to ORG` | charge inference to an org, for tokens scoped to one |
 | `--yolo` | skip approval prompts |
-| `--no-commit` | do not commit after each turn |
 | `--hub-skills` | also load skills from the Hub |
 
 Every flag has an environment default: `NANOHARNESS_MODEL`, `NANOHARNESS_PROVIDER`,
@@ -191,7 +173,6 @@ good idea:
 | from | idea |
 |---|---|
 | [pi](https://github.com/badlogic/pi-mono) | the four-tool set; a sub-1000-token system prompt, because frontier models already know what a coding agent is; skills that need no tool of their own; the `edit` uniqueness and match-against-original rules |
-| [aider](https://github.com/Aider-AI/aider) | commit every agent turn, so version control *is* the undo stack |
 | [Claude Code](https://claude.com/claude-code) and [dsh](https://github.com/deepseek-ai/deepseek-harness) | the `SKILL.md` frontmatter and `AGENTS.md` project-context conventions, shared across harnesses so a skill is portable |
 | [Codex](https://github.com/openai/codex) | an approval gate in front of mutating calls, with a session-wide "always" |
 | [dsh](https://github.com/deepseek-ai/deepseek-harness) | skills as a *remote registry* rather than only local files — hence `--hub-skills` |
@@ -213,6 +194,8 @@ Each of these was considered and rejected, mostly following pi's reasoning:
 - **Plan mode** — ask for a plan file instead. Then you can actually see it, edit it,
   and diff it.
 - **Background bash** — use tmux, and keep full control of the process.
+- **Committing for you** — it wrote a commit per turn for a while, and every surprise
+  it caused outweighed the convenience. Your git history should be yours.
 
 ## Not here yet
 
@@ -227,7 +210,7 @@ file before pointing it at anything you care about.
 pytest test_nanoharness.py
 ```
 
-55 tests, no network — the model is faked, so the agent loop, tool semantics and the
+54 tests, no network — the model is faked, so the agent loop, tool semantics and the
 UI are all covered offline.
 
 ## License

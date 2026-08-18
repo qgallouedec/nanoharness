@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import io
-import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -22,7 +21,6 @@ from nanoharness import (
     ToolError,
     build_system_prompt,
     discover_skills,
-    git_autocommit,
     parse_frontmatter,
     summarize,
     tool_bash,
@@ -216,45 +214,6 @@ def test_system_prompt_includes_context_and_skills(root: Path) -> None:
     assert "<name>tidy</name>" in prompt and "/s/SKILL.md" in prompt
 
 
-# --- git ------------------------------------------------------------------
-
-
-def test_git_autocommit_commits_changes(root: Path) -> None:
-    for args in (["init", "-q"], ["config", "user.email", "t@t.co"], ["config", "user.name", "t"]):
-        subprocess.run(["git", *args], cwd=root, capture_output=True)
-    subprocess.run(["git", "add", "-A"], cwd=root, capture_output=True)
-    subprocess.run(["git", "commit", "-qm", "init"], cwd=root, capture_output=True)
-
-    (root / "calc.py").write_text("changed\n")
-    assert git_autocommit(root, "fix the thing", set()) is not None
-    log = subprocess.run(["git", "log", "-1", "--format=%s"], cwd=root, capture_output=True, text=True)
-    assert log.stdout.strip() == "fix the thing"
-
-
-def test_git_autocommit_leaves_work_that_was_already_dirty(root: Path) -> None:
-    """A turn must not sweep up edits that predate it and name them after its prompt."""
-    for args in (["init", "-q"], ["config", "user.email", "t@t.co"], ["config", "user.name", "t"]):
-        subprocess.run(["git", *args], cwd=root, capture_output=True)
-    subprocess.run(["git", "add", "-A"], cwd=root, capture_output=True)
-    subprocess.run(["git", "commit", "-qm", "init"], cwd=root, capture_output=True)
-
-    (root / "calc.py").write_text("my own work in progress\n")
-    before = nanoharness.git_dirty(root)
-    (root / "agent.py").write_text("what the agent wrote\n")
-
-    assert git_autocommit(root, "write agent.py", before) is not None
-    files = subprocess.run(
-        ["git", "show", "--name-only", "--format=", "HEAD"], cwd=root, capture_output=True, text=True
-    )
-    assert files.stdout.split() == ["agent.py"]
-    assert (root / "calc.py").read_text() == "my own work in progress\n"
-    assert "calc.py" in nanoharness.git_dirty(root)  # still uncommitted, still yours
-
-
-def test_git_autocommit_is_a_no_op_outside_a_repo(root: Path) -> None:
-    assert git_autocommit(root, "nothing to see", set()) is None
-
-
 # --- the loop, with a faked model ----------------------------------------
 
 
@@ -288,7 +247,6 @@ def make_agent(root: Path, rounds: list[list[SimpleNamespace]]) -> Agent:
         model="fake",
         client=FakeClient(rounds),  # type: ignore[arg-type]
         system="test",
-        autocommit=False,
     )
 
 
@@ -422,6 +380,7 @@ def test_the_approval_gate_blocks_a_write_until_a_key(root: Path, key: str, writ
     call = {"id": "1", "name": "write", "arguments": '{"path": "gated.py", "content": "x = 1\\n"}'}
     agent = make_agent(root, [[chunk(calls=[call])], [chunk("ok")]])
     app = NanoHarness(agent, [], yolo=False)
+    seen: dict[str, bool] = {}
 
     async def drive() -> None:
         async with app.run_test() as pilot:
@@ -431,15 +390,61 @@ def test_the_approval_gate_blocks_a_write_until_a_key(root: Path, key: str, writ
                 await pilot.pause()
                 if app.row is not None:  # the inline gate is up
                     break
-            assert app.query_one("#prompt").disabled, "input must not eat the answer"
+            seen["disabled_while_open"] = app.query_one("#prompt").disabled
             await pilot.press(key)
             for _ in range(50):
                 await pilot.pause()
                 if not app.busy:
                     break
+            seen["disabled_after"] = app.query_one("#prompt").disabled
 
     asyncio.run(drive())
     assert (root / "gated.py").exists() is written
+    assert seen["disabled_while_open"] is True, "input must not eat the answer"
+    assert seen["disabled_after"] is False, "input left dead after the gate closed"
+    assert app.gate is None and app.row is None
+
+
+def test_a_stray_keypress_outside_a_gate_changes_nothing(root: Path) -> None:
+    """`self.gate` is published only by open_gate, on the UI thread, once the row is up.
+
+    That ordering is what stops a keypress resolving a gate before it is drawn --
+    which would then disable the input with nothing left to switch it back on.
+    """
+    app = NanoHarness(make_agent(root, [[chunk("hi")]]), [], yolo=False)
+    seen: dict[str, bool] = {}
+
+    async def drive() -> None:
+        async with app.run_test() as pilot:
+            for key in ("y", "a", "n", "escape"):
+                await pilot.press(key)
+            await pilot.pause()
+            seen["disabled"] = app.query_one("#prompt").disabled
+
+    asyncio.run(drive())
+    assert app.gate is None
+    assert app.row is None
+    assert seen["disabled"] is False
+
+
+def test_quitting_releases_a_blocked_gate(root: Path) -> None:
+    """Otherwise the worker waits on an event nobody will ever set, and exit hangs."""
+    call = {"id": "1", "name": "bash", "arguments": '{"command": "true"}'}
+    app = NanoHarness(make_agent(root, [[chunk(calls=[call])], [chunk("ok")]]), [], yolo=False)
+
+    async def drive() -> None:
+        async with app.run_test() as pilot:
+            app.query_one("#prompt").value = "go"
+            await pilot.press("enter")
+            for _ in range(60):
+                await pilot.pause()
+                if app.row is not None:
+                    break
+            app.action_bail()
+            await pilot.pause()
+
+    asyncio.run(drive())
+    assert app.gate is None
 
 
 def test_the_app_boots_and_takes_a_command(root: Path) -> None:

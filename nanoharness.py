@@ -11,9 +11,9 @@ Inference Providers.
     uv run nanoharness.py
 
 Assembled from what the good open harnesses already proved: the minimal tool
-set and lazy skills from pi, per-turn git commits from aider, the SKILL.md and
-AGENTS.md conventions shared by Claude Code and dsh. README.md credits what
-came from where.
+set and lazy skills from pi, the SKILL.md and AGENTS.md conventions shared by
+Claude Code and dsh, an approval gate from Codex. README.md credits what came
+from where.
 """
 
 from __future__ import annotations
@@ -411,55 +411,6 @@ def summarize(name: str, args: dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# git
-#
-# aider's best idea: commit what the agent changed, every turn. Undo becomes
-# `git revert`, review becomes `git show`, and the harness needs no checkpoint
-# format of its own. The subject is the request, not the model's prose.
-# ---------------------------------------------------------------------------
-
-
-def git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["git", *args], cwd=root, capture_output=True, text=True)
-
-
-def git_dirty(root: Path) -> set[str]:
-    """Paths git currently reports as changed. Empty when this is not a repo."""
-    done = git(root, "status", "--porcelain")
-    if done.returncode != 0:
-        return set()
-    # `XY path`, or `XY old -> new` for a rename; the destination is what matters.
-    return {
-        line[3:].split(" -> ")[-1].strip().strip('"') for line in done.stdout.splitlines() if line.strip()
-    }
-
-
-def git_autocommit(root: Path, request: str, before: set[str]) -> str | None:
-    """Commit only what this turn dirtied, and return the short sha.
-
-    Anything already modified when the turn started belongs to you, not to the
-    agent, so it is left alone -- otherwise a single turn sweeps unrelated work
-    into a commit named after an unrelated request.
-    """
-    changed = sorted(git_dirty(root) - before)
-    if not changed:
-        return None
-    subject = " ".join(request.split())[:68] or "agent changes"
-    git(root, "add", "--", *changed)
-    git(
-        root,
-        "commit",
-        "-m",
-        subject,
-        "-m",
-        "Co-Authored-By: nanoharness <noreply@huggingface.co>",
-        "--",
-        *changed,
-    )
-    return git(root, "rev-parse", "--short", "HEAD").stdout.strip() or None
-
-
-# ---------------------------------------------------------------------------
 # agent loop
 #
 # reason -> act -> observe, until the model stops asking for tools. No UI
@@ -474,7 +425,7 @@ class Callbacks:
     on_text: Callable[[str], None] = lambda chunk: None
     on_tool_start: Callable[[str, dict[str, Any]], None] = lambda name, args: None
     on_tool_end: Callable[[str, str, bool], None] = lambda name, result, ok: None
-    on_turn_end: Callable[[str | None], None] = lambda sha: None
+    on_turn_end: Callable[[], None] = lambda: None
     approve: Callable[[str, dict[str, Any]], bool] = lambda name, args: True
 
 
@@ -484,7 +435,6 @@ class Agent:
     model: str
     client: InferenceClient
     system: str
-    autocommit: bool = True
     messages: list[dict[str, Any]] = field(default_factory=list)
     tokens: int = 0
     cb: Callbacks = field(default_factory=Callbacks)
@@ -520,8 +470,6 @@ class Agent:
     def run(self, prompt: str, cb: Callbacks) -> None:
         """Drive one user turn to completion."""
         self.cb = cb
-        # Whatever is already dirty is yours; only new damage gets committed.
-        before = git_dirty(self.root) if self.autocommit else set()
         self.messages.append({"role": "user", "content": prompt})
 
         for _ in range(MAX_STEPS):
@@ -552,7 +500,7 @@ class Agent:
             # tools. Say so rather than ending the turn as if it had finished.
             cb.on_text(f"\n[stopped after {MAX_STEPS} tool rounds]")
 
-        cb.on_turn_end(git_autocommit(self.root, prompt, before) if self.autocommit else None)
+        cb.on_turn_end()
 
     def invoke(self, call: dict[str, Any]) -> tuple[str, bool]:
         name, args, error = call["name"], {}, None
@@ -683,7 +631,7 @@ class NanoHarness(App[None]):
     TITLE = "nanoharness"
     CSS = CSS
     BINDINGS = [
-        Binding("ctrl+c", "quit", "quit"),
+        Binding("ctrl+c", "bail", "quit"),
         Binding("ctrl+l", "clear", "clear"),
     ]
 
@@ -802,7 +750,7 @@ class NanoHarness(App[None]):
                     on_text=lambda chunk: hop(self.stream, chunk),
                     on_tool_start=lambda name, args: hop(self.show_call, name, args),
                     on_tool_end=lambda name, result, ok: hop(self.show_result, name, result, ok),
-                    on_turn_end=lambda sha: hop(self.finish, sha),
+                    on_turn_end=lambda: hop(self.finish),
                     approve=self.approve,
                 ),
             )
@@ -842,14 +790,21 @@ class NanoHarness(App[None]):
         """Called on the worker thread. Blocks it until a keypress resolves the gate."""
         if self.yolo:
             return True
-        self.answer, self.gate = "", threading.Event()
-        self.call_from_thread(self.open_gate)
-        self.gate.wait()
+        done = threading.Event()
+        self.call_from_thread(self.open_gate, done)
+        done.wait()
         self.yolo = self.yolo or self.answer == "always"
         return self.answer in ("yes", "always")
 
-    def open_gate(self) -> None:
-        """Ask in the transcript, directly under the call being asked about."""
+    def open_gate(self, done: threading.Event) -> None:
+        """Ask in the transcript, directly under the call being asked about.
+
+        The gate becomes answerable only here, on the UI thread, once the row is
+        up and the input is off. Publishing it from the worker instead would let
+        a keypress resolve a gate that has not been drawn yet -- and this method
+        would then disable the input with nothing left to switch it back on.
+        """
+        self.answer, self.gate = "", done
         self.row = self.say(
             Text.assemble(
                 ("? ", f"bold {THEME.warning}"),
@@ -868,12 +823,16 @@ class NanoHarness(App[None]):
         self.set_focus(None)
 
     def on_key(self, event: events.Key) -> None:
-        if self.gate is None or self.gate.is_set():
+        if self.gate is None:
             return
         answer = {"y": "yes", "a": "always", "n": "no", "escape": "no"}.get(event.key)
         if answer is None:
             return
         event.stop()
+        self.close_gate(answer)
+
+    def close_gate(self, answer: str) -> None:
+        """Take the row down, give the keyboard back, and release the worker."""
         self.answer = answer
         if self.row is not None:
             self.row.remove()
@@ -881,12 +840,18 @@ class NanoHarness(App[None]):
         prompt = self.query_one("#prompt", Input)
         prompt.disabled = False
         prompt.focus()
-        self.gate.set()
+        gate, self.gate = self.gate, None
+        if gate is not None:
+            gate.set()
 
-    def finish(self, sha: str | None) -> None:
+    def action_bail(self) -> None:
+        """Quit. An open gate is refused first, or the blocked worker hangs the exit."""
+        if self.gate is not None:
+            self.close_gate("no")
+        self.exit()
+
+    def finish(self) -> None:
         self.seal()
-        if sha:
-            self.say(Text(f"committed {sha}", style="dim"))
         self.busy = False
         self.sync_status()
 
@@ -983,7 +948,6 @@ def headless(agent: Agent, prompt: str) -> int:
             on_text=lambda chunk: (sys.stdout.write(chunk), sys.stdout.flush()),
             on_tool_start=lambda name, args: print(f"\n▸ {name}  {summarize(name, args)}", flush=True),
             on_tool_end=lambda name, result, ok: print(truncate(result, 20, 2000, "tail"), flush=True),
-            on_turn_end=lambda sha: print(f"\ncommitted {sha}" if sha else "", flush=True),
         ),
     )
     return 0
@@ -1014,7 +978,6 @@ def main() -> int:
         help="charge inference to this org, for tokens scoped to one",
     )
     parser.add_argument("--yolo", action="store_true", help="skip approval prompts")
-    parser.add_argument("--no-commit", action="store_true", help="do not commit after each turn")
     parser.add_argument("--hub-skills", action="store_true", help="also load skills from the Hub")
     args = parser.parse_args()
 
@@ -1029,7 +992,6 @@ def main() -> int:
         model=args.model,
         client=InferenceClient(provider=args.provider, api_key=token, bill_to=args.bill_to),
         system=build_system_prompt(root, skills),
-        autocommit=not args.no_commit,
     )
 
     if args.prompt:
